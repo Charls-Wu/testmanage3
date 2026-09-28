@@ -4,8 +4,8 @@ import { useTranslation } from '@nocobase/i18n/client';
 import type { ReactElement } from 'react';
 import { Link, Outlet, useSearchParams } from 'react-router';
 
+import { descriptionSummary } from './description-summary.js';
 import { FactoryLinks } from './factory-source.js';
-import { MarkdownContent } from '../markdown.js';
 import { Loading } from '@/components/loading';
 import { PageContainer } from '@/components/page-container';
 import { PageHeader } from '@/components/page-header';
@@ -52,6 +52,8 @@ interface ProblemsData {
 const ALL = 'all';
 const OPEN = 'open';
 const MINE = 'me';
+/** The feature point filter value for problems filed under no feature point. */
+const UNCATEGORIZED = 'none';
 
 /**
  * One problem list for material gaps and test findings alike: the type filter is
@@ -80,13 +82,15 @@ export default function ProblemsPage(): ReactElement {
     `problems|${featurePointFilter}|${typeFilter}|${statusFilter}|${onlyMine ? currentUserId : ''}`,
     async (signal) => {
       const filter: {
-        featurePointId?: number;
+        featurePointId?: number | null;
         type?: ProblemType;
         status?: ProblemStatus;
         open?: boolean;
         ownerId?: string;
       } = {};
-      if (featurePointFilter !== ALL) {
+      if (featurePointFilter === UNCATEGORIZED) {
+        filter.featurePointId = null;
+      } else if (featurePointFilter !== ALL) {
         filter.featurePointId = Number(featurePointFilter);
       }
       if (typeFilter !== ALL) {
@@ -147,6 +151,10 @@ export default function ProblemsPage(): ReactElement {
             className='md:w-72'
             options={[
               { value: ALL, label: t('testProgress.allFeaturePoints') },
+              {
+                value: UNCATEGORIZED,
+                label: t('testProgress.uncategorized'),
+              },
               ...(featurePoints.data ?? []).map((feature) => ({
                 value: String(feature.id),
                 label:
@@ -232,18 +240,9 @@ export default function ProblemsPage(): ReactElement {
                           {problem.title}
                         </Link>
                         {problem.description === null ? null : (
-                          <MarkdownContent
-                            className='mt-2 line-clamp-2 text-muted-foreground'
-                            content={
-                              problem.description
-                                .split(/\n\s*\n/)
-                                .find(
-                                  (part) =>
-                                    part.trim() &&
-                                    !/^#{1,6}\s/.test(part.trim()),
-                                ) ?? problem.description
-                            }
-                          />
+                          <span className='mt-0.5 line-clamp-2 break-words text-xs text-muted-foreground'>
+                            {descriptionSummary(problem.description)}
+                          </span>
                         )}
                         {problem.factorySource && (
                           <FactoryLinks

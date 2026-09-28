@@ -698,6 +698,84 @@ describe('test progress schema', () => {
     ).toMatchObject({ owner: '杨洽' });
   });
 
+  it('counts Uncategorized problems beside the dimensions and lists them alone', async () => {
+    const database = createTestDatabase();
+    await migrateAndSeed(database);
+    const service = createTestProgressService(database);
+    const before = await service.getSummary();
+    expect(before.uncategorized).toEqual({ total: 0, open: 0 });
+
+    // Only factory intake files a problem with no feature point.
+    const client = await knex(database);
+    const [row] = (await client('issues')
+      .insert({
+        title: '待归类问题',
+        feature_point_id: null,
+        type: 'automation',
+        status: 'pending',
+        created_at: new Date(),
+        updated_at: new Date(),
+      })
+      .returning('id')) as { id: number }[];
+
+    const summary = await service.getSummary();
+    expect(summary.uncategorized).toEqual({ total: 1, open: 1 });
+    // Every problem is in exactly one dimension row or in the Uncategorized row.
+    expect(
+      summary.dimensions.reduce((sum, item) => sum + item.problems.total, 0) +
+        summary.uncategorized.total,
+    ).toBe(summary.totals.materialProblems + summary.totals.testProblems);
+    expect(
+      (await service.listProblems({ featurePointId: null })).map(
+        (problem) => problem.id,
+      ),
+    ).toEqual([Number(row.id)]);
+  });
+
+  it('links an inherited name-only owner the way a typed name is linked', async () => {
+    const database = createTestDatabase();
+    await migrateAndSeed(database);
+    const service = createTestProgressService(database);
+    const actor = { id: 'actor', name: 'actor' };
+    const points = await service.listFeaturePoints();
+    const database_ = points.find((item) => item.name === '数据库')!;
+    const auth = points.find((item) => item.name === '认证')!;
+    // The points were given names before their owners had accounts.
+    await service.updateFeaturePoint(database_.id, { owner: '陈霖' });
+    await service.updateFeaturePoint(auth.id, { owner: '杨洽' });
+    const client = await knex(database);
+    await client('user').insert([
+      { id: 'account-chenlin', name: '陈霖', username: 'chenlin' },
+      { id: 'account-yangqia', name: '杨洽', username: 'yangqia' },
+    ]);
+
+    expect(
+      await service.createProblem(
+        { title: '随功能点分配', featurePointId: database_.id },
+        actor,
+      ),
+    ).toMatchObject({ owner: '陈霖', ownerId: 'account-chenlin' });
+
+    const unassigned = await service.createProblem(
+      { title: '暂不分配', featurePointId: database_.id, ownerId: null },
+      actor,
+    );
+    expect(
+      await service.updateProblem(
+        unassigned.id,
+        { featurePointId: auth.id },
+        actor,
+      ),
+    ).toMatchObject({ owner: '杨洽', ownerId: 'account-yangqia' });
+
+    // One workload bucket per person: nobody is counted once by account and
+    // again by name.
+    const { owners } = await service.getSummary();
+    expect(owners.filter((owner) => owner.owner === '陈霖')).toEqual([
+      expect.objectContaining({ ownerId: 'account-chenlin' }),
+    ]);
+  });
+
   it('summarizes open problems per owner, most open first', async () => {
     const database = createTestDatabase();
     // No seeds: an empty tracker keeps the expected buckets exact.

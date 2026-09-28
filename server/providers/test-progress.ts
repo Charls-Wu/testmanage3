@@ -1,12 +1,17 @@
 import type { Application } from '@nocobase/app-server/application';
 import {
-  factoryProblemSource,
+  parseReportLinkFacts,
+  problemSourceFromFacts,
   type FactoryProblemSource,
+  type ReportLinkFacts,
 } from './evaluations/problems.js';
-import { validateDocument } from './evaluations/protocol.js';
-import type { ArchiveManifest } from './evaluations/document.js';
 import type { FactoryPreviewConfig } from '../config/factory-preview.js';
 import { loggingToken } from '@nocobase/app-server/logging';
+import {
+  inheritFeaturePointOwner,
+  linkOwnerName,
+  type OwnerFields,
+} from './problem-owners.js';
 import {
   databaseManagerToken,
   type DatabaseManager,
@@ -238,7 +243,8 @@ export interface ProblemInput {
 }
 
 export interface ProblemFilter {
-  readonly featurePointId?: number;
+  /** `null` selects Uncategorized problems, which have no feature point. */
+  readonly featurePointId?: number | null;
   readonly type?: ProblemType;
   readonly status?: ProblemStatus;
   /** Only problems that are not yet verified. */
@@ -304,6 +310,12 @@ export interface ProgressSummary {
   readonly exampleExists: ExampleExistsBreakdown;
   readonly problems: Readonly<Record<ProblemType, ProblemCounts>>;
   readonly dimensions: readonly DimensionSummary[];
+  /**
+   * Problems factory intake could not place under a feature point. They count in
+   * `totals` and `owners` but belong to no dimension, so the overview lists them
+   * as their own row.
+   */
+  readonly uncategorized: ProblemCounts;
   /** Per-owner workload, most open problems first. */
   readonly owners: readonly OwnerWorkload[];
 }
@@ -937,18 +949,9 @@ export interface TestProgressServiceOptions {
   readonly factoryPreview?: FactoryPreviewConfig;
 }
 
-/** Parsed report sources kept per process, oldest dropped first beyond this. */
-const REPORT_SOURCE_CACHE_LIMIT = 2000;
-
 class DefaultTestProgressService implements TestProgressService {
-  /**
-   * Report id → its source without `reportUrl`, or null when it has none. A stored
-   * report revision never changes, so it is parsed once per process.
-   */
-  private readonly reportSources = new Map<
-    string,
-    FactoryProblemSource | null
-  >();
+  /** Reports whose missing links were already logged by this process. */
+  private readonly reportsWithoutLinks = new Set<string>();
 
   public constructor(
     private readonly database: DatabaseManager,
@@ -1245,7 +1248,9 @@ class DefaultTestProgressService implements TestProgressService {
         'classificationNote',
       ]);
 
-    if (filter.featurePointId !== undefined) {
+    if (filter.featurePointId === null) {
+      query = query.where('featurePointId', 'is', null);
+    } else if (filter.featurePointId !== undefined) {
       query = query.where('featurePointId', '=', filter.featurePointId);
     }
     if (filter.type !== undefined) {
@@ -1326,10 +1331,10 @@ class DefaultTestProgressService implements TestProgressService {
   }
 
   /**
-   * Report links for problems already selected by the existing read scope. Only
-   * `reportUrl`, which a replay may add once, is read every time; the rest comes
-   * from the parsed report. A report that cannot be read loses its links and is
-   * logged, instead of failing every list that includes one of its problems.
+   * Report links for problems already selected by the existing read scope, built
+   * from the small link facts stored with each report rather than its document.
+   * A report without readable facts loses its links and is logged once, instead
+   * of failing every list that includes one of its problems.
    */
   private async factorySources(
     reportIds: string[],
@@ -1337,65 +1342,47 @@ class DefaultTestProgressService implements TestProgressService {
     const sources = new Map<string, FactoryProblemSource>();
     const ids = [...new Set(reportIds)];
     for (let offset = 0; offset < ids.length; offset += 200) {
-      const links = await this.database
+      const rows = await this.database
         .query()
         .selectFrom('evaluationReports')
-        .select(['id', 'reportUrl'])
+        .select(['id', 'reportUrl', 'problemSource'])
         .where('id', 'in', ids.slice(offset, offset + 200))
         .execute();
-      const unread = links
-        .map((row) => String(row.id))
-        .filter((id) => !this.reportSources.has(id));
-      if (unread.length > 0) {
-        const stored = await this.database
-          .query()
-          .selectFrom('evaluationReports')
-          .select(['id', 'document', 'manifest', 'bundleFileId'])
-          .where('id', 'in', unread)
-          .execute();
-        for (const row of stored) this.rememberReportSource(row);
-      }
-      for (const row of links) {
-        const source = this.reportSources.get(String(row.id));
-        if (source)
-          sources.set(String(row.id), {
-            ...source,
-            reportUrl: typeof row.reportUrl === 'string' ? row.reportUrl : null,
-          });
+      for (const row of rows) {
+        const id = String(row.id);
+        const facts = this.readLinkFacts(id, row.problemSource);
+        if (facts)
+          sources.set(
+            id,
+            problemSourceFromFacts(
+              id,
+              facts,
+              typeof row.reportUrl === 'string' ? row.reportUrl : null,
+              this.factoryPreview,
+            ),
+          );
       }
     }
     return sources;
   }
 
-  private rememberReportSource(row: Row): void {
-    const id = String(row.id);
-    let source: FactoryProblemSource | null = null;
-    try {
-      const document = validateDocument(JSON.parse(String(row.document)));
-      if (document.type === 'evaluation-report')
-        source = factoryProblemSource(
-          id,
-          document,
-          row.bundleFileId == null
-            ? ['evaluation.json']
-            : (JSON.parse(String(row.manifest)) as ArchiveManifest).files.map(
-                (file) => file.path,
-              ),
-          null,
-          row.bundleFileId != null,
-          this.factoryPreview,
-        );
-    } catch (error) {
+  private readLinkFacts(id: string, stored: unknown): ReportLinkFacts | null {
+    let error: unknown = null;
+    if (typeof stored === 'string') {
+      try {
+        return parseReportLinkFacts(stored);
+      } catch (caught) {
+        error = caught;
+      }
+    }
+    if (!this.reportsWithoutLinks.has(id)) {
+      this.reportsWithoutLinks.add(id);
       this.logger.error(
-        { reportId: id, err: error },
-        'Stored factory report could not be read; its problems are listed without report links.',
+        { reportId: id, ...(error === null ? {} : { err: error }) },
+        'Stored factory report has no readable link facts; its problems are listed without report links.',
       );
     }
-    if (this.reportSources.size >= REPORT_SOURCE_CACHE_LIMIT) {
-      const oldest = this.reportSources.keys().next();
-      if (!oldest.done) this.reportSources.delete(oldest.value);
-    }
-    this.reportSources.set(id, source);
+    return null;
   }
 
   public async createProblem(
@@ -1903,6 +1890,11 @@ class DefaultTestProgressService implements TestProgressService {
       exampleExists,
       problems: problemsByType,
       dimensions,
+      uncategorized: sumProblemCounts(
+        countProblems(
+          problems.filter((problem) => problem.featurePointId == null),
+        ),
+      ),
       owners,
     };
   }
@@ -1981,18 +1973,14 @@ class DefaultTestProgressService implements TestProgressService {
   }
 
   /** The owner a problem inherits when it is filed under this feature point. */
-  private async featurePointOwner(
-    id: number,
-  ): Promise<{ owner: string | null; ownerId: string | null } | null> {
-    const row = await this.database
-      .query()
+  private async featurePointOwner(id: number): Promise<OwnerFields | null> {
+    const query = this.database.query();
+    const row = await query
       .selectFrom('featurePoints')
       .select(['owner', 'ownerId'])
       .where('id', '=', id)
       .executeTakeFirst();
-    const owner = asOptionalText(row?.owner);
-    const ownerId = asOptionalText(row?.ownerId);
-    return owner || ownerId ? { owner, ownerId } : null;
+    return row ? inheritFeaturePointOwner(query, row) : null;
   }
 
   /**
@@ -2030,18 +2018,7 @@ class DefaultTestProgressService implements TestProgressService {
       return { owner: null, ownerId: null };
     }
 
-    const matches = await this.database
-      .query()
-      .selectFrom('user')
-      .select(['id', 'name'])
-      .where('name', '=', owner)
-      .limit(2)
-      .execute();
-    if (matches.length !== 1) {
-      return { owner, ownerId: null };
-    }
-
-    return { owner: asText(matches[0].name), ownerId: String(matches[0].id) };
+    return linkOwnerName(this.database.query(), owner);
   }
 
   private async requireFeaturePoint(id: number): Promise<void> {

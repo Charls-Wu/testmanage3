@@ -26,9 +26,11 @@ import activityMigration from '../../database/main/migrations/202609220003_creat
 import factoryMigration from '../../database/main/migrations/202609250002_collect_factory_problems.js';
 import linkMigration from '../../database/main/migrations/202609250003_reference_factory_reports.js';
 import classificationMigration from '../../database/main/migrations/202609280001_add_problem_classification.js';
+import linkFactsMigration from '../../database/main/migrations/202609280002_store_report_link_facts.js';
 import { createTestProgressService } from '../../server/providers/test-progress.js';
 import {
   factoryProblemSource,
+  reportLinkFacts,
   type SubmittedProblem,
 } from '../../server/providers/evaluations/problems.js';
 import {
@@ -201,6 +203,7 @@ async function setup() {
   await factoryMigration.up(context);
   await linkMigration.up(context);
   await classificationMigration.up(context);
+  await linkFactsMigration.up(context);
   await db.query().insertInto('user').values({ id: 'admin' }).execute();
   await db
     .query()
@@ -469,7 +472,7 @@ describe('factory problem reception', () => {
     ]);
   });
 
-  it('reads each report once and lists problems without the links of one it cannot read', async () => {
+  it('lists links from stored link facts and skips a report without them', async () => {
     const { save, db } = await setup();
     const received = await save(report());
     const reportId = received.receipt.receiptId;
@@ -478,28 +481,68 @@ describe('factory problem reception', () => {
     const [problem] = await tracker.listProblems({ type: 'automation' });
     expect(problem.factorySource?.reportId).toBe(reportId);
 
-    // The parsed report is kept, but a report link a replay adds later is seen.
+    // Lists never read the document again, and see a report link a replay adds.
     await db
       .query()
       .updateTable('evaluationReports')
       .set({ document: '{', reportUrl: 'https://reports.example.com/1.html' })
       .where('id', '=', reportId)
       .execute();
-    expect((await tracker.getProblem(problem.id)).factorySource).toMatchObject({
-      reportId,
+    expect((await tracker.getProblem(problem.id)).factorySource).toEqual({
+      ...problem.factorySource,
       reportUrl: 'https://reports.example.com/1.html',
     });
 
-    // A report that cannot be read costs its links, not the list, and is logged once.
-    const fresh = createTestProgressService(db, { logger });
-    const listed = await fresh.listProblems({ type: 'automation' });
+    // Facts that cannot be read cost their links, not the list, and are logged once.
+    await db
+      .query()
+      .updateTable('evaluationReports')
+      .set({ problemSource: '{' })
+      .where('id', '=', reportId)
+      .execute();
+    const listed = await tracker.listProblems({ type: 'automation' });
     expect(listed.map((row) => row.id)).toEqual([problem.id]);
     expect(listed[0].factorySource).toBeUndefined();
-    await fresh.listProblems({ type: 'automation' });
+    await tracker.listProblems({ type: 'automation' });
     expect(logger.error).toHaveBeenCalledTimes(1);
     expect(logger.error).toHaveBeenCalledWith(
       expect.objectContaining({ reportId }),
       expect.any(String),
+    );
+  });
+
+  it('backfills link facts for stored reports, archived ones included', async () => {
+    const { save, db, context, legacy } = await setup();
+    const linked = await save(report());
+    const archivedDocument = report();
+    archivedDocument.run.key = 'owner/factory/issues/147/initial';
+    archivedDocument.run.task.issue = 147;
+    const archived = await legacy(archivedDocument);
+    const stored = async () =>
+      new Map(
+        (
+          await db
+            .query()
+            .selectFrom('evaluationReports')
+            .select(['id', 'problemSource'])
+            .execute()
+        ).map((row) => [String(row.id), row.problemSource]),
+      );
+    const written = (await stored()).get(linked.receipt.receiptId);
+
+    await linkFactsMigration.down!(context);
+    await linkFactsMigration.up(context);
+    const backfilled = await stored();
+    // The backfill writes exactly what the receiver writes on import.
+    expect(backfilled.get(linked.receipt.receiptId)).toBe(written);
+    expect(
+      JSON.parse(String(backfilled.get(archived.receipt.receiptId))),
+    ).toEqual(
+      reportLinkFacts(
+        archivedDocument,
+        ['evaluation.json', 'report.html'],
+        true,
+      ),
     );
   });
 
@@ -1122,6 +1165,28 @@ describe('factory problem classification', () => {
     await save(d, classified(d, rule, none, rule));
     expect((await tracker.getProblem(third.id)).owner).toBe('龚诚');
     expect((await tracker.getProblem(third.id)).featurePointId).toBe(3);
+  });
+
+  it("links an inherited name-only owner to that name's only account", async () => {
+    const { save, db } = await setup();
+    await tree(db);
+    // The point was given a name before its owner had an account.
+    await db
+      .query()
+      .insertInto('user')
+      .values({ id: 'chen-lin', name: '陈霖' })
+      .execute();
+    const d = report();
+    const rule = {
+      featurePointId: 3,
+      method: 'rule' as const,
+      reason: 'pkg:@nocobase/db → Building/Database',
+    };
+    await save(d, classified(d, rule));
+    const [problem] = await createTestProgressService(db).listProblems({
+      type: 'automation',
+    });
+    expect(problem).toMatchObject({ owner: '陈霖', ownerId: 'chen-lin' });
   });
 
   it('accepts a different classification on retry and rejects malformed ones', async () => {
