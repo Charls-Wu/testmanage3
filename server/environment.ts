@@ -10,6 +10,10 @@ export const environmentMappings: Readonly<Record<string, EnvironmentMapping>> =
     // Secrets
     AUTH_SECRET: envString('auth.secret'),
     SESSION_SECRET: envString('session.secret'),
+    FACTORY_GITHUB_TOKEN: envString('buildTasks.token'),
+    FACTORY_BUILDS_ENABLED: envBoolean('buildTasks.enabled'),
+    PROBLEM_FIXES_GITHUB_TOKEN: envString('problemFixes.token'),
+    PROBLEM_FIXES_ENABLED: envBoolean('problemFixes.enabled'),
 
     // Deployment
     APP_SERVER_HOST: envString('server.host'),

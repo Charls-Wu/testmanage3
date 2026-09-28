@@ -4,9 +4,15 @@ import type { AppRouteContribution } from '@nocobase/app-server/router';
 import { apiGuideRoutes } from './api-guide.js';
 import problemFileRoutes from './files.js';
 import { testProgressApiRoutes } from './test-progress.js';
+import { evaluationRoutes } from './evaluations.js';
+import { buildTaskRoutes } from './build-tasks.js';
+import { problemFixRoutes } from './problem-fixes.js';
 
 const routes: readonly AppRouteContribution<Application>[] = [
   testProgressApiRoutes,
+  evaluationRoutes,
+  buildTaskRoutes,
+  problemFixRoutes,
   apiGuideRoutes,
   ...problemFileRoutes,
 ];

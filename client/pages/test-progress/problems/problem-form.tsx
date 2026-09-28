@@ -36,6 +36,12 @@ interface ProblemFormData {
   readonly members: ProblemMember[];
 }
 
+/**
+ * Picker value for an owner stored as a name with no account (a feature point's
+ * owner is often only a name). Saving leaves that owner as it is.
+ */
+const UNLINKED_OWNER = '__unlinked-owner__';
+
 interface FormValues {
   title: string;
   description: string;
@@ -128,7 +134,8 @@ function ProblemFormFields({
       return {
         title: initial.title,
         description: initial.description ?? '',
-        featurePointId: String(initial.featurePointId),
+        featurePointId:
+          initial.featurePointId == null ? '' : String(initial.featurePointId),
         type: initial.type,
         status: initial.status,
         // Rows written before the account association carry a name only;
@@ -136,7 +143,7 @@ function ProblemFormFields({
         ownerId:
           initial.ownerId ??
           members.find((member) => member.name === initial.owner)?.id ??
-          '',
+          (initial.owner ? UNLINKED_OWNER : ''),
       };
     }
 
@@ -169,10 +176,6 @@ function ProblemFormFields({
       setSaveError(t('testProgress.problemTitleRequired'));
       return;
     }
-    if (values.featurePointId === '') {
-      setSaveError(t('testProgress.featurePointRequired'));
-      return;
-    }
 
     setSaving(true);
     setSaveError(null);
@@ -181,10 +184,16 @@ function ProblemFormFields({
         title,
         description:
           values.description.trim() === '' ? null : values.description,
-        featurePointId: Number(values.featurePointId),
+        featurePointId:
+          values.featurePointId === '' ? null : Number(values.featurePointId),
         type: values.type,
         status: values.status,
-        ownerId: values.ownerId.trim() === '' ? null : values.ownerId.trim(),
+        ...(values.ownerId === UNLINKED_OWNER
+          ? {}
+          : {
+              ownerId:
+                values.ownerId.trim() === '' ? null : values.ownerId.trim(),
+            }),
       };
       if (problemId === undefined) {
         await createProblem(api, payload);
@@ -249,18 +258,18 @@ function ProblemFormFields({
 
       <div className='grid gap-4 sm:grid-cols-2'>
         <div className='space-y-2'>
-          <Label>
-            {t('testProgress.fieldFeaturePoint')}
-            <span className='text-destructive'> *</span>
-          </Label>
+          <Label>{t('testProgress.fieldFeaturePoint')}</Label>
           <FormSelect
-            options={featurePoints.map((feature) => ({
-              value: String(feature.id),
-              label:
-                feature.level === 'dimension'
-                  ? feature.name
-                  : `— ${feature.name}`,
-            }))}
+            options={[
+              { value: '', label: t('testProgress.uncategorized') },
+              ...featurePoints.map((feature) => ({
+                value: String(feature.id),
+                label:
+                  feature.level === 'dimension'
+                    ? feature.name
+                    : `— ${feature.name}`,
+              })),
+            ]}
             placeholder={t('testProgress.selectPlaceholder')}
             value={values.featurePointId}
             onValueChange={(value) => update('featurePointId', value)}
@@ -293,6 +302,18 @@ function ProblemFormFields({
           <FormSelect
             options={[
               { value: '', label: t('testProgress.ownerNone') },
+              ...(initial?.owner &&
+              !initial.ownerId &&
+              !members.some((member) => member.name === initial.owner)
+                ? [
+                    {
+                      value: UNLINKED_OWNER,
+                      label: t('testProgress.ownerUnlinked', {
+                        name: initial.owner,
+                      }),
+                    },
+                  ]
+                : []),
               ...members.map((member) => ({
                 value: member.id,
                 label: member.name,

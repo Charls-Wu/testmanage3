@@ -4,6 +4,8 @@ import { useTranslation } from '@nocobase/i18n/client';
 import type { ReactElement } from 'react';
 import { Link, Outlet, useSearchParams } from 'react-router';
 
+import { FactoryLinks } from './factory-source.js';
+import { MarkdownContent } from '../markdown.js';
 import { Loading } from '@/components/loading';
 import { PageContainer } from '@/components/page-container';
 import { PageHeader } from '@/components/page-header';
@@ -41,6 +43,7 @@ import {
 } from '../shared.js';
 import { useAsyncResource } from '../use-async-resource.js';
 import { useRefetchOnReturn } from '../use-refetch-on-return.js';
+import { ClassificationBadge } from './classification-badge.js';
 
 interface ProblemsData {
   readonly problems: Problem[];
@@ -128,7 +131,6 @@ export default function ProblemsPage(): ReactElement {
     }
     setSearchParams(next, { replace: true });
   }
-
 
   return (
     <PageContainer>
@@ -229,9 +231,24 @@ export default function ProblemsPage(): ReactElement {
                           {problem.title}
                         </Link>
                         {problem.description === null ? null : (
-                          <span className='mt-0.5 block text-xs text-muted-foreground'>
-                            {problem.description}
-                          </span>
+                          <MarkdownContent
+                            className='mt-2 line-clamp-2 text-muted-foreground'
+                            content={
+                              problem.description
+                                .split(/\n\s*\n/)
+                                .find(
+                                  (part) =>
+                                    part.trim() &&
+                                    !/^#{1,6}\s/.test(part.trim()),
+                                ) ?? problem.description
+                            }
+                          />
+                        )}
+                        {problem.factorySource && (
+                          <FactoryLinks
+                            source={problem.factorySource}
+                            compact
+                          />
                         )}
                       </TableCell>
                       <TableCell className='whitespace-nowrap text-muted-foreground'>
@@ -241,12 +258,25 @@ export default function ProblemsPage(): ReactElement {
                         {problem.owner ?? '—'}
                       </TableCell>
                       <TableCell>
-                        <Link
-                          className='text-primary underline-offset-4 hover:underline'
-                          to={`/progress/features/${problem.featurePointId}`}
-                        >
-                          {problem.featurePointName ?? '—'}
-                        </Link>
+                        <span className='inline-flex items-center gap-1.5 whitespace-nowrap'>
+                          {problem.featurePointId == null ? (
+                            <span className='text-muted-foreground'>
+                              {t('testProgress.uncategorized')}
+                            </span>
+                          ) : (
+                            <Link
+                              className='text-primary underline-offset-4 hover:underline'
+                              to={`/progress/features/${problem.featurePointId}`}
+                            >
+                              {problem.featurePointName ?? '—'}
+                            </Link>
+                          )}
+                          {problem.classification && (
+                            <ClassificationBadge
+                              classification={problem.classification}
+                            />
+                          )}
+                        </span>
                       </TableCell>
                       <TableCell
                         className={PROBLEM_STATUS_CELL_CLASS[problem.status]}

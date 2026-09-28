@@ -144,7 +144,7 @@ Keep HTTP concerns in the route and domain logic in a service under `server/prov
 
 Schema changes are migrations under `database/main/migrations/`. Data the application requires to run is a seed under `database/main/seeds/`. Seeds never create structure.
 
-`database/<connection>/collections/` holds what the database currently resolves each Collection to — `collection.json`, `metadata.json` and `schema.json` per Collection plus a `_manifest.json` — written by `pnpm collections:generate` after migrating. Every file there is derived: edit metadata through migrations or the Collection Metadata Service and regenerate, never by hand, and never import these files from a migration. `pnpm collections:generate --check` fails when they are out of date.
+`database/<connection>/collections/` holds what the database currently resolves each Collection to — `collection.json`, `metadata.json` and `schema.json` per Collection plus a `_manifest.json` — written by `pnpm collections:generate` after migrating. Every file there is derived: edit metadata through migrations or the Collection Metadata Service and regenerate, never by hand, and never import these files from a migration. `pnpm collections:generate --check` fails when they are out of date. This application keeps full-database snapshots local and gitignored, including plugin Collections. On a fresh checkout, migrate and generate before checking. Commit self-contained migrations and seeds, not generated snapshots.
 
 ```ts
 const migration: MigrationDefinition = defineMigration({
@@ -349,7 +349,19 @@ The authorization provider clears the permission snapshot before rendering a new
 
 Navigation groups retain their expanded or collapsed state while the navigation tree stays mounted. Selecting a new page expands its ancestor groups without collapsing other groups; users can still collapse the active group manually. Keep this behavior aligned across the application, Settings, and Dev tools navigation.
 
+## Factory problem collection
+
+GitHub Actions selects and submits problems; TestManage receives them in its existing Problems page and embeds the source report link. There is no standalone evaluation, scoring, comparison, mapping, finding-review or regression module. Do not reintroduce one to receive a report.
+
+The compatible protocol retains its deployed names: `server/providers/evaluations/`, `server/routes/evaluations.ts`, `/api/evaluations/import` and `evaluation-import`. Reuse native API Keys, Authorization, policy-bound Repositories, File Repository and Drive. Keep top-level receipts, source binding, immutable revisions, duplicate prevention and existing human edits. The factory classifies problems into feature points before delivery (`GET /api/evaluations/feature-points`, optional per-problem `classification`); the receiver fills only a problem nobody has classified, and a person's change marks it `manual` so no delivery overrides it. A problem filed under a feature point while it has no owner inherits that point's owner, whoever files it; an existing owner is never replaced. Unclassified imports stay Uncategorized for staff to classify in the existing Problems page. See `docs/evaluation-integration.md`.
+
+New deliveries use `testmanage3-links-v1` JSON only. Validate consumed metadata in `document.ts`; keep producer scoring fields opaque and preserve the original JSON for replay comparisons. Do not reintroduce full evaluation schemas, code generation, ZIP uploads or archive writes. File Repository and Drive are read-only compatibility for already-stored archives.
+
+Already-deployed migrations and the original permission seed remain immutable. The old resource declaration in `permissions.ts` exists only for that seed; runtime registers only `factoryIntegrationResource`. The follow-up seed retires removed grants without replacing custom grants or integration-manager access. Historical review tables remain stored but have no registered UI/API. The receiver only reads old finding dispositions to prevent resurrecting dismissed problems, and never writes new review records. Downloads are available only through the authorized problem; never expose the archive File Repository access path publicly.
+
 ## Development logging
+
+`HttpErrorsProvider` registers `applicationErrorHandler` during the native boot lifecycle because a deployment may install separate Better Auth dependency copies. Authentication's class-identity check can then miss a native API key refusal. The App boundary uses Better Auth's public `isAPIError` guard to retain 4xx status, body, and headers; Hono exceptions and unknown server errors keep their existing behavior. Remove this compatibility boundary only when the native middleware handles cross-package errors and deployed verification passes.
 
 `pnpm dev` owns the ready banner and public URL; `APP_SERVER_START_LOG=false` suppresses the underlying listener announcement through `server/environment.ts`. Keep that mapping when editing deployment environment settings. Request starts, request headers and config diagnostics use DEBUG; the normal INFO output contains completion summaries. See the shared application development Skill for hosted logging and upgrade limits.
 
@@ -358,3 +370,20 @@ Navigation groups retain their expanded or collapsed state while the navigation 
 `runtime.paths`, configuration context `paths`, and `app.paths` share one resolved `AppPaths` object. Use `paths.storage('...')`, `paths.database('...')`, or the corresponding directory fields. `AppPathOptions` is input only; application path policies run before the final object is created and configuration is loaded. Standalone entries declare the deployment root in `server/runtime.ts` so the server and CLI share persistent storage outside the compiled code directory.
 
 `server/app.ts` calls `createAppFromRuntime(runtime)` to transfer configuration, paths, mode and Host logging policy and bind `runtime.app`. Keep Provider, middleware and route registration explicit and ordered; `startApplicationInScope` owns startup and shutdown binding.
+
+## Build tasks
+
+Application-owned build tasks live in `client/pages/build-tasks/` and
+`server/providers/build-tasks/`. The configured GitHub token is server-only.
+Comments append requirements; only an explicit run captures a snapshot and
+triggers GitHub. Preserve the durable idempotency and single-active-run rules.
+`factory:external` Issues require the factory's explicit-dispatch guard.
+Each new run creates its own Issue, persists its identity, closes it for archival,
+and dispatches only after closure succeeds. Never reopen or rewrite an earlier
+run's Issue. Require the factory's `factory:external-closed-v1` entry capability.
+The task Issue field is only the latest-submission link; run history owns every
+Issue identity. An Issue being closed does not determine the execution result.
+Authenticated existing report imports update run results; match the producer
+time to its captured run, so old reports cannot complete a newer request.
+The `build-task-operator` business permission set is independently assignable;
+never change root/member configuration to enable this feature.

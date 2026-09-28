@@ -1,6 +1,205 @@
 import type { LocaleResource } from '@nocobase/i18n';
 
 const enUS = {
+  buildTasks: {
+    title: 'Build tasks',
+    description:
+      'Define requirements, add follow-up comments and run the factory when ready.',
+    detailDescription:
+      'Each run captures saved requirements and comments. Results return here automatically.',
+    create: 'New task',
+    edit: 'Edit task',
+    save: 'Save task',
+    saved: 'Task saved',
+    saving: 'Saving…',
+    cancel: 'Cancel',
+    close: 'Close',
+    search: 'Search tasks',
+    taskTitle: 'Task title',
+    statusLabel: 'Status',
+    branch: 'Target branch',
+    creator: 'Created by',
+    updatedAt: 'Updated',
+    actions: 'Actions',
+    taskType: 'Task type',
+    requirements: 'Requirements',
+    acceptance: 'Acceptance criteria',
+    acceptanceHint:
+      'Optional. Used by QA separately from implementation requirements.',
+    defaultAcceptance: 'QA will verify the business requirements.',
+    branchHint:
+      'Leave blank to create a dedicated application branch. The branch is fixed after the first submission.',
+    sampleData: 'Sample data',
+    review: 'Framework review',
+    yes: 'Yes',
+    no: 'No',
+    run: 'Run once',
+    running: 'Run in progress',
+    confirmRun: 'Run this task?',
+    runDescription:
+      'Create a new Issue from the saved requirements and all current comments, close it for archival, then start a real GitHub Actions build using the factory’s model budget. Closing the Issue does not stop the build. Later comments are included in the next run.',
+    submitting: 'Submitting…',
+    submitted: 'Build submitted',
+    submitError:
+      'Submission could not be confirmed. Refresh the run history before retrying.',
+    dispatchFailed:
+      'The build was not submitted. Check the factory integration and try again.',
+    dispatchUnknown:
+      'GitHub may have accepted this request. Refresh its status; another run stays blocked until it is reconciled.',
+    notConfigured:
+      'Task editing is available. An administrator must configure the GitHub factory integration before running tasks.',
+    loadError: 'Unable to load build tasks. Please retry.',
+    saveError:
+      'Unable to save. Check required fields, branch rules and whether a run is active.',
+    empty: 'No matching tasks. Create a task to start.',
+    refresh: 'Refresh status',
+    refreshError: 'Unable to refresh GitHub status. Please retry.',
+    comments: 'Comments and follow-up requirements',
+    commentsHint:
+      'Comments are append-only and do not trigger builds. They become requirements the next time you click Run once.',
+    addComment: 'Add comment',
+    commentAdded: 'Comment added',
+    commentError: 'Unable to add comment. Please retry.',
+    noComments: 'No follow-up requirements yet.',
+    history: 'Run history',
+    noRuns: 'This task has not been run.',
+    issue: 'Factory Issue',
+    latestIssue: 'Latest Issue',
+    actionsRun: 'Actions run',
+    pullRequest: 'Code PR',
+    report: 'Original report',
+    preview: 'Preview',
+    snapshot: 'Submitted snapshot',
+    execution: 'Execution',
+    acceptanceResult: 'Acceptance',
+    delivery: 'Delivery',
+    operator: 'Build task operator',
+    permissions: {
+      read: 'Read tasks and results',
+      manage: 'Create and edit tasks',
+      comment: 'Append requirements',
+      run: 'Trigger builds and synchronize status',
+    },
+    types: {
+      create: 'Create a new system',
+      improve: 'Improve an existing system',
+      fix: 'Fix an existing system',
+    },
+    reviews: {
+      auto: 'Repository default',
+      off: 'Lightweight',
+      full: 'Full',
+    },
+    status: {
+      draft: 'Not run',
+      dispatching: 'Submitting',
+      queued: 'Queued',
+      running: 'Running',
+      awaiting_result: 'Waiting for report',
+      completed: 'Completed',
+      failed: 'Failed',
+      cancelled: 'Cancelled',
+      dispatch_failed: 'Submission failed',
+      dispatch_unknown: 'Submission unconfirmed',
+    },
+    result: {
+      running: 'Running',
+      completed: 'Finished',
+      cancelled: 'Cancelled',
+      'timed-out': 'Timed out',
+      'budget-exhausted': 'Budget exhausted',
+      blocked: 'Blocked',
+      unknown: 'Unknown',
+      passed: 'Passed',
+      failed: 'Failed',
+      'not-run': 'Not run',
+      published: 'PR published',
+      'not-published': 'Not published',
+    },
+  },
+
+  problemFixes: {
+    title: 'Claude Code problem fixes',
+    operator: 'Problem fix operator',
+    permissions: {
+      read: 'Read fix runs and results',
+      run: 'Start Claude Code fixes and synchronize status',
+    },
+    sectionTitle: 'Claude Code review and fix',
+    description:
+      'Claude Code re-checks this problem against the latest nocobase/nocobase3 source. When it is confirmed, Claude Code fixes it and opens a draft PR. The conclusion is added to the comments below.',
+    run: 'Send to Claude Code for review and fix',
+    running: 'Fix in progress',
+    confirm: 'Start review and fix',
+    cancel: 'Cancel',
+    confirmTitle: 'Send this problem to Claude Code?',
+    confirmDescription:
+      'The current description and all existing comments are frozen, then a real GitHub Actions run starts. Claude Code re-checks the problem on the latest nocobase/nocobase3 source; if it is confirmed, Claude Code fixes it and opens a draft PR under the maintainer’s GitHub account. Each run uses the Claude Code subscription quota. Comments added later are not included in this run.',
+    submitting: 'Submitting…',
+    submitted: 'Sent to Claude Code',
+    submitError:
+      'Submission could not be confirmed. Refresh the run history before retrying.',
+    dispatchFailed:
+      'The run was not submitted. Check the factory integration and try again.',
+    dispatchUnknown:
+      'GitHub may have accepted this request. Refresh its status; another run stays blocked until it is reconciled.',
+    notConfigured:
+      'An administrator must configure the GitHub factory integration before problems can be sent to Claude Code.',
+    activeHint:
+      'A run is in progress. Its conclusion will be added to the comments when it finishes.',
+    refresh: 'Refresh status',
+    refreshError: 'Unable to refresh GitHub status. Please retry.',
+    loadError: 'Unable to load Claude Code runs. Please retry.',
+    noRuns: 'This problem has not been sent to Claude Code.',
+    fromGitHub: 'Started from GitHub Actions',
+    pullRequest: 'Draft PR',
+    actionsRun: 'Actions run',
+    usage: {
+      label: 'Usage',
+      elapsed: 'Total time',
+      session: 'Claude Code session',
+      tokens: 'Tokens (with cache)',
+      cost: 'List-price estimate',
+      turns: '{{turns}} turns',
+      breakdown:
+        'Input {{input}} · output {{output}} · cache write {{cacheWrite}} · cache read {{cacheRead}}',
+      incomplete:
+        'Usage was not fully reported; only the reported part is shown.',
+      unknown: 'Unknown',
+      hours: '{{h}}h {{m}}m {{s}}s',
+      minutes: '{{m}}m {{s}}s',
+      seconds: '{{s}}s',
+    },
+    status: {
+      dispatching: 'Submitting',
+      queued: 'Queued',
+      running: 'Running',
+      awaiting_result: 'Finished without a result',
+      completed: 'Completed',
+      failed: 'Failed',
+      cancelled: 'Cancelled',
+      dispatch_failed: 'Submission failed',
+      dispatch_unknown: 'Submission unconfirmed',
+    },
+    verdict: {
+      confirmed: 'Confirmed',
+      not_reproducible: 'Not reproducible',
+      already_fixed: 'Already fixed in the latest source',
+      not_framework: 'Not a framework problem',
+      needs_info: 'Needs more information',
+      error: 'Run failed',
+    },
+  },
+
+  // Labels for administrator-customized historical permission sets.
+  'evaluations.roles.evaluation-reader': 'Legacy report reader',
+  'evaluations.roles.evaluation-reviewer': 'Legacy report reviewer',
+  'factoryIntegration.title': 'Factory integrations',
+  'factoryIntegration.manage': 'Manage factory credentials',
+  'factoryIntegration.manager': 'Factory integration manager',
+  'testProgress.downloadBundle': 'Download original report bundle',
+  'testProgress.downloadHtml': 'Download HTML report',
+  'testProgress.downloadJson': 'Download report JSON',
   'auth.welcome': 'Welcome back',
   'auth.loginDescription': 'Sign in with your username or email and password.',
   'auth.registerTitle': 'Create an account',
@@ -168,6 +367,7 @@ const enUS = {
     allDimensions: 'All dimensions',
     onlyMine: 'Only mine',
     ownerNone: 'Unassigned',
+    ownerUnlinked: '{{name}} (no account)',
     allStatuses: 'All statuses',
     createFeature: 'New feature point',
     columnFeature: 'Feature point',
@@ -233,6 +433,34 @@ const enUS = {
     fieldExampleCurrent: 'Current example state',
     fieldRemark: 'Remark',
     fieldFeaturePoint: 'Feature point',
+    uncategorized: 'Uncategorized',
+    autoClassification: {
+      rule: 'Auto · rule',
+      model: 'Auto · AI',
+      noNote: 'The factory gave no reason for this classification.',
+    },
+    factorySourceTitle: 'Complete test report',
+    factoryIssue: 'Source Issue',
+    factoryPullRequest: 'Code PR',
+    factoryEnvironment: 'PR preview environment',
+    factoryNoEnvironment: 'No environment URL',
+    reportPreview: 'Read HTML report',
+    reportLinkHint:
+      'The report is served by its source. You can also open it in a new window.',
+    reportOpenOriginal: 'Open original report',
+    reportPreviewHint:
+      'Read and scroll through the report here. Optional file downloads are below.',
+    reportExpand: 'Expand reading area',
+    reportReduce: 'Reduce reading area',
+    reportPreviewError:
+      'Unable to load the report. Retry or download the original.',
+    reportRetry: 'Reload report',
+    reportNoHtml:
+      'This report has no HTML preview. The complete bundle is available below.',
+    reportDownloads: 'Download report files (optional)',
+    factoryNoPullRequest: 'No PR recorded',
+    factoryRun: 'Actions run',
+    factoryReport: 'Full report',
     selectPlaceholder: 'Select…',
     scorePlaceholder: '0–10',
     notePlaceholder: 'Notes',
@@ -270,8 +498,7 @@ const enUS = {
     hint: {
       skills:
         '"Available" needs all three:\n1. Findable: retrievable, with the path recorded;\n2. Workable: main-flow steps, commands or APIs are given;\n3. Verifiable: at least one check or expected result.\nOtherwise use "Missing" and record the gaps as missing items. Boundaries and writing quality are scored separately.',
-      docs:
-        'Both sources are required:\n1. Plugin source docs (README, docs);\n2. Website docs (code/docs).\nEach must be findable, cover the main flow and be verifiable; record whichever is absent as a missing item.',
+      docs: 'Both sources are required:\n1. Plugin source docs (README, docs);\n2. Website docs (code/docs).\nEach must be findable, cover the main flow and be verifiable; record whichever is absent as a missing item.',
       scores:
         'Scores run 0–10, higher is better. Bands: >=8 green, 7–8 blue, 6–7 amber, <6 red; an unrated score shows "—".\nEach score follows the score-rubric (design, development completeness, Agent friendliness, output quality) and must cite its evidence.',
       designScore:

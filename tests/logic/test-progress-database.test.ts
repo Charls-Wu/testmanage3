@@ -19,9 +19,12 @@ import problemTypeMigration from '../../database/main/migrations/202609220001_ad
 import problemCommentsMigration from '../../database/main/migrations/202609220002_create_problem_comments.js';
 import problemActivitiesMigration from '../../database/main/migrations/202609220003_create_problem_activities.js';
 import ownerIdMigration from '../../database/main/migrations/202609220006_add_owner_id.js';
+import factoryMigration from '../../database/main/migrations/202609250002_collect_factory_problems.js';
+import classificationMigration from '../../database/main/migrations/202609280001_add_problem_classification.js';
 import seed from '../../database/main/seeds/202609210002_seed_test_progress_data.js';
 import mergeSeed from '../../database/main/seeds/202609220003_seed_merge_missing_items_into_problems.js';
 import ownerBackfillSeed from '../../database/main/seeds/202609220008_seed_backfill_owner_ids.js';
+import problemOwnerSeed from '../../database/main/seeds/202609280001_seed_assign_problem_owners.js';
 import {
   createTestProgressService,
   parseFeaturePointInput,
@@ -94,6 +97,8 @@ async function migrateOnly(database: DatabaseManager): Promise<void> {
   await problemCommentsMigration.up(migrationContext(database));
   await problemActivitiesMigration.up(migrationContext(database));
   await ownerIdMigration.up(migrationContext(database));
+  await factoryMigration.up(migrationContext(database));
+  await classificationMigration.up(migrationContext(database));
 }
 
 async function migrateAndSeed(database: DatabaseManager): Promise<void> {
@@ -201,7 +206,9 @@ describe('test progress schema', () => {
 
     const examples = await service.listProblems({ type: 'example' });
     expect(examples).toHaveLength(50);
-    expect(examples.every((problem) => problem.status === 'pending')).toBe(true);
+    expect(examples.every((problem) => problem.status === 'pending')).toBe(
+      true,
+    );
 
     // A second run must not duplicate anything, and must not overwrite edits.
     const target = first.find((item) => item.name === '数据库');
@@ -392,7 +399,9 @@ describe('test progress schema', () => {
       featurePointName: '认证',
     });
 
-    const fixing = await service.updateProblem(created.id, { status: 'fixing' });
+    const fixing = await service.updateProblem(created.id, {
+      status: 'fixing',
+    });
     expect(fixing.status).toBe('fixing');
 
     const listed = await service.listProblems({
@@ -410,7 +419,10 @@ describe('test progress schema', () => {
       }),
     ).toHaveLength(1);
     expect(
-      await service.listProblems({ featurePointId: feature.id, type: 'skills' }),
+      await service.listProblems({
+        featurePointId: feature.id,
+        type: 'skills',
+      }),
     ).toHaveLength(0);
 
     const open = (await service.listFeaturePoints()).find(
@@ -508,7 +520,7 @@ describe('test progress schema', () => {
     expect(
       (await service.listProblems({ owner: '陈霖' })).map((p) => p.title),
     ).toEqual(['陈霖的问题']);
-    expect((await service.listProblems({ owner: '无人' }))).toHaveLength(0);
+    expect(await service.listProblems({ owner: '无人' })).toHaveLength(0);
     // 50 problems come from the workbook seed; the three above are added here.
     expect(await service.listProblems()).toHaveLength(53);
   });
@@ -602,6 +614,80 @@ describe('test progress schema', () => {
         (item) => item.id === featurePoint.id,
       ),
     ).toMatchObject({ owner: '无人', ownerId: null });
+  });
+
+  it('hands a problem filed under a feature point to its owner unless it has one', async () => {
+    const database = createTestDatabase();
+    await migrateAndSeed(database);
+    const service = createTestProgressService(database);
+    const actor = { id: 'actor', name: 'actor' };
+    const points = await service.listFeaturePoints();
+    const database_ = points.find((item) => item.name === '数据库')!;
+    const auth = points.find((item) => item.name === '认证')!;
+    // Feature point owners are often names with no account.
+    await service.updateFeaturePoint(database_.id, { owner: '陈霖' });
+    await service.updateFeaturePoint(auth.id, { owner: '杨洽' });
+
+    const filed = await service.createProblem(
+      { title: '随功能点分配', featurePointId: database_.id },
+      actor,
+    );
+    expect(filed).toMatchObject({ owner: '陈霖', ownerId: null });
+    const owned = await service.createProblem(
+      { title: '已有负责人', featurePointId: database_.id, owner: '龚诚' },
+      actor,
+    );
+    expect(owned.owner).toBe('龚诚');
+
+    const later = await service.createProblem(
+      { title: '稍后归类', featurePointId: null },
+      actor,
+    );
+    expect(later.owner).toBeNull();
+    expect(
+      await service.updateProblem(
+        later.id,
+        { featurePointId: database_.id },
+        actor,
+      ),
+    ).toMatchObject({ owner: '陈霖' });
+    // Moving an owned problem keeps its owner, and edits that do not send an
+    // owner keep a name-only one.
+    expect(
+      await service.updateProblem(later.id, { featurePointId: auth.id }, actor),
+    ).toMatchObject({ owner: '陈霖', featurePointId: auth.id });
+    expect(
+      await service.updateProblem(later.id, { status: 'fixing' }, actor),
+    ).toMatchObject({ owner: '陈霖' });
+    // Clearing the owner in place leaves it unassigned; clearing it while
+    // moving the problem hands it to the new point's owner.
+    expect(
+      await service.updateProblem(later.id, { ownerId: null }, actor),
+    ).toMatchObject({ owner: null });
+    expect(
+      await service.updateProblem(
+        later.id,
+        { ownerId: null, featurePointId: database_.id },
+        actor,
+      ),
+    ).toMatchObject({ owner: '陈霖' });
+
+    // The backfill hands ownerless problems to their point's owner only.
+    const client = await knex(database);
+    await client('issues')
+      .whereIn('id', [filed.id, owned.id])
+      .update({ owner: null, owner_id: null });
+    await client('issues').where('id', '=', owned.id).update({ owner: '龚诚' });
+    const orphan = await service.createProblem(
+      { title: '未归类', featurePointId: null },
+      actor,
+    );
+    await problemOwnerSeed.run(seedContext(database));
+    expect(await service.getProblem(filed.id)).toMatchObject({
+      owner: '陈霖',
+    });
+    expect((await service.getProblem(owned.id)).owner).toBe('龚诚');
+    expect((await service.getProblem(orphan.id)).owner).toBeNull();
   });
 
   it('summarizes open problems per owner, most open first', async () => {
@@ -813,10 +899,7 @@ describe('test progress schema', () => {
       parseFeaturePointInput({ name: '' }, { partial: false }),
     ).toThrow(TestProgressValidationError);
     expect(() =>
-      parseProblemInput(
-        { title: 'x', featurePointId: 0 },
-        { partial: false },
-      ),
+      parseProblemInput({ title: 'x', featurePointId: 0 }, { partial: false }),
     ).toThrow(TestProgressValidationError);
     expect(() =>
       parseProblemInput(

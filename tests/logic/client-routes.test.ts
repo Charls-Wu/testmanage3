@@ -17,6 +17,7 @@ describe('app client routes', () => {
   it('declares application and settings route contributions', async () => {
     expect(applicationRoutes).toHaveLength(3);
     const routes = applicationRoutes[0].routes;
+    expect(routes.some((route) => route.name === 'evaluations')).toBe(false);
     expect(routes.slice(0, 5)).toMatchObject([
       {
         auth: 'required',
@@ -44,10 +45,9 @@ describe('app client routes', () => {
         path: '/progress/missing-items',
       },
       { name: 'testProgressIssuesRedirect', path: '/progress/issues' },
+      { name: 'buildTasks', path: '/build-tasks' },
     ]);
-    expect(
-      (routes[8] as { navigation?: unknown }).navigation,
-    ).toBeUndefined();
+    expect((routes[8] as { navigation?: unknown }).navigation).toBeUndefined();
     expect(applicationRoutes[1]).toEqual({
       parent: 'settings',
       routes: [],
@@ -100,6 +100,10 @@ describe('app client routes', () => {
       // Old paths stay reachable and are covered by their own page check.
       { name: 'testProgressMissingItemsRedirect', authorizedAs: null },
       { name: 'testProgressIssuesRedirect', authorizedAs: null },
+      { name: 'buildTasks', authorizedAs: 'buildTasks' },
+      { name: 'buildTaskNew', authorizedAs: null },
+      { name: 'buildTaskDetail', authorizedAs: null },
+      { name: 'buildTaskEdit', authorizedAs: null },
     ]);
   });
 });
