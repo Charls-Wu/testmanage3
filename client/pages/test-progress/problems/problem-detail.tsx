@@ -58,9 +58,9 @@ export default function ProblemDetailPage(): ReactElement {
   const settle = useCallback(() => {
     void fetchProblem(api, id)
       .then((next) => mutate(() => next))
-      .catch(() => {});
+      .catch(() => toast.error(t('problemFixes.settleError')));
     setRevision((value) => value + 1);
-  }, [api, id, mutate]);
+  }, [api, id, mutate, t]);
 
   const notFound =
     !validId ||
@@ -247,9 +247,7 @@ function CopyForAgentButton({
       `- ${t('testProgress.fieldOwner')}: ${problem.owner ?? '—'}`,
       '',
       `## ${t('testProgress.fieldProblemDescription')}`,
-      description.trim() === ''
-        ? t('testProgress.noNote')
-        : resolvedDescription,
+      description.trim() === '' ? t('testProgress.noNote') : resolvedDescription,
     ];
 
     if (images.length > 0) {

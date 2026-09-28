@@ -8,6 +8,8 @@ import { authorizationToken } from '@nocobase/app-plugin-authorization';
 import type { Application } from '@nocobase/app-server/application';
 import { Hono, type MiddlewareHandler } from 'hono';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import evaluationsMigration from '../../database/main/migrations/202609250001_create_evaluations.js';
+import reportLinksMigration from '../../database/main/migrations/202609250003_reference_factory_reports.js';
 import migration from '../../database/main/migrations/202609270001_create_build_tasks.js';
 import { BuildTasksService } from '../../server/providers/build-tasks/service.js';
 import { GitHubBuildClient } from '../../server/providers/build-tasks/github.js';
@@ -51,6 +53,9 @@ async function setup() {
     query: db.query(),
     connection: db.connection(),
   } as unknown as MigrationContext;
+  // Refresh replays stored reports; releases write the integration audit log.
+  await evaluationsMigration.up(context);
+  await reportLinksMigration.up(context);
   await migration.up(context);
   let nextIssue = 146;
   const github = {
@@ -236,6 +241,221 @@ describe('build tasks', () => {
       (await service.detail(id)).runs.find((r) => r?.id === second?.id)?.active,
     ).toBe(true);
   });
+  it('reads stored wall-clock datetimes as the instants written on a host west of UTC', async () => {
+    const zone = process.env.TZ;
+    process.env.TZ = 'America/Los_Angeles';
+    try {
+      const { service, github, db } = await setup();
+      // Without a run id from dispatch, only the request time links a report.
+      github.dispatch.mockResolvedValueOnce(null as never);
+      const task = await service.save(null, input, actor),
+        id = String(task.id);
+      await service.comment(id, 'Escalate after 24 hours.', actor);
+      const run = await service.trigger(id, randomUUID(), actor);
+      await db
+        .query()
+        .updateTable('buildTaskRuns')
+        .set({ dispatchRequestedAt: new Date('2026-09-21T14:13:19.000Z') })
+        .where('id', '=', String(run?.id))
+        .execute();
+      await db
+        .query()
+        .updateTable('buildTaskComments')
+        .set({ createdAt: new Date('2026-09-21T14:00:00.000Z') })
+        .where('taskId', '=', id)
+        .execute();
+      // The column keeps Los Angeles wall-clock time without a zone.
+      expect(
+        (
+          await db
+            .query()
+            .selectFrom('buildTaskRuns')
+            .select('dispatchRequestedAt')
+            .where('id', '=', String(run?.id))
+            .executeTakeFirst()
+        )?.dispatchRequestedAt,
+      ).toBe('2026-09-21T07:13:19.000');
+      github.findRun.mockResolvedValueOnce(null);
+      await service.refresh(id, String(run?.id));
+      expect(github.findRun).toHaveBeenCalledWith(
+        run?.id,
+        '2026-09-21T14:13:19.000Z',
+      );
+      // The producer started one second after the request.
+      await service.recordReport(
+        {
+          ...structuredClone(reportFixture),
+          outcome: {
+            pullRequest: null,
+            execution: 'completed',
+            acceptance: 'passed',
+            delivery: 'published',
+          },
+        },
+        '',
+        'report-west',
+      );
+      const detail = await service.detail(id);
+      expect(detail.runs[0]).toMatchObject({
+        status: 'completed',
+        active: false,
+        dispatchRequestedAt: '2026-09-21T14:13:19.000Z',
+        result: { reportId: 'report-west' },
+      });
+      expect(detail.comments[0]?.createdAt).toBe('2026-09-21T14:00:00.000Z');
+      github.dispatch.mockResolvedValueOnce('200');
+      await service.trigger(id, randomUUID(), actor);
+      expect(github.createIssue.mock.calls[1]?.[1]).toContain(
+        '2026-09-21T14:00:00.000Z',
+      );
+    } finally {
+      if (zone === undefined) delete process.env.TZ;
+      else process.env.TZ = zone;
+    }
+  });
+  it('releases a run whose report never arrived and records who did it', async () => {
+    const { service, github, db } = await setup();
+    const task = await service.save(null, input, actor),
+      id = String(task.id);
+    const run = await service.trigger(id, randomUUID(), actor);
+    github.run.mockResolvedValueOnce({
+      id: 100,
+      status: 'completed',
+      conclusion: 'success',
+    });
+    expect(await service.refresh(id, String(run?.id))).toMatchObject({
+      status: 'awaiting_result',
+      active: true,
+    });
+    await expect(service.save(id, input, actor)).rejects.toMatchObject({
+      code: 'ACTIVE_RUN',
+    });
+    expect(
+      await service.release(id, String(run?.id), { id: 'lead', name: 'Lead' }),
+    ).toMatchObject({
+      status: 'abandoned',
+      active: false,
+      error: 'RELEASED',
+      released: { byName: 'Lead', at: expect.stringMatching(/Z$/) },
+    });
+    const audit = await db
+      .query()
+      .selectFrom('evaluationAudit')
+      .selectAll()
+      .where('target', '=', String(run?.id))
+      .execute();
+    expect(audit).toMatchObject([
+      { actorId: 'lead', action: 'buildTaskRun.release' },
+    ]);
+    expect(JSON.parse(String(audit[0]?.detail))).toEqual({
+      taskId: id,
+      fromStatus: 'awaiting_result',
+      actorName: 'Lead',
+    });
+    expect((await service.detail(id)).runs[0]).toMatchObject({
+      status: 'abandoned',
+      released: { byName: 'Lead' },
+    });
+    await expect(
+      service.release(id, String(run?.id), actor),
+    ).rejects.toMatchObject({ code: 'CONFLICT', message: 'RUN_NOT_ACTIVE' });
+    await expect(
+      service.release(id, randomUUID(), actor),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    github.run.mockClear();
+    expect(await service.refresh(id, String(run?.id))).toMatchObject({
+      status: 'abandoned',
+    });
+    expect(github.run).not.toHaveBeenCalled();
+    await service.save(id, input, actor);
+    github.dispatch.mockResolvedValueOnce('200');
+    expect(await service.trigger(id, randomUUID(), actor)).toMatchObject({
+      status: 'queued',
+      active: true,
+    });
+  });
+  it('records a report that arrives after a release without taking the task back', async () => {
+    const { service, github } = await setup();
+    const task = await service.save(null, input, actor),
+      id = String(task.id);
+    const first = await service.trigger(id, randomUUID(), actor);
+    await service.release(id, String(first?.id), actor);
+    github.dispatch.mockResolvedValueOnce('200');
+    const second = await service.trigger(id, randomUUID(), actor);
+    const report = (execution: string, revision: number) => ({
+      ...structuredClone(reportFixture),
+      revision,
+      outcome: {
+        pullRequest: null,
+        execution,
+        acceptance: execution === 'completed' ? 'passed' : 'not-run',
+        delivery: 'not-published',
+      },
+    });
+    await service.recordReport(report('running', 1), '', 'report-running');
+    let runs = (await service.detail(id)).runs;
+    expect(runs.find((r) => r?.id === first?.id)).toMatchObject({
+      status: 'abandoned',
+      active: false,
+      result: { reportId: 'report-running', execution: 'running' },
+    });
+    expect(runs.find((r) => r?.id === second?.id)).toMatchObject({
+      status: 'queued',
+      active: true,
+    });
+    await service.recordReport(report('completed', 2), '', 'report-final');
+    runs = (await service.detail(id)).runs;
+    expect(runs.find((r) => r?.id === first?.id)).toMatchObject({
+      status: 'completed',
+      active: false,
+      result: { reportId: 'report-final' },
+    });
+    expect(runs.find((r) => r?.id === second?.id)).toMatchObject({
+      active: true,
+    });
+  });
+  it('replays stored reports but does not ask GitHub once builds are disabled', async () => {
+    const { service, github } = await setup();
+    const task = await service.save(null, input, actor),
+      id = String(task.id);
+    const run = await service.trigger(id, randomUUID(), actor);
+    github.configured = false;
+    expect(await service.refresh(id, String(run?.id))).toMatchObject({
+      status: 'queued',
+      active: true,
+    });
+    expect(github.run).not.toHaveBeenCalled();
+    expect(await service.release(id, String(run?.id), actor)).toMatchObject({
+      status: 'abandoned',
+      active: false,
+    });
+  });
+  it('keeps a release made while GitHub is being called', async () => {
+    const { service, github } = await setup();
+    const task = await service.save(null, input, actor),
+      id = String(task.id);
+    github.dispatch.mockImplementationOnce(async (_issue, runId) => {
+      await service.release(id, runId, actor);
+      throw new Error('Timeout');
+    });
+    expect(await service.trigger(id, randomUUID(), actor)).toMatchObject({
+      status: 'abandoned',
+      active: false,
+    });
+    github.dispatch.mockImplementationOnce(async (_issue, runId) => {
+      await service.release(id, runId, actor);
+      return '300';
+    });
+    expect(await service.trigger(id, randomUUID(), actor)).toMatchObject({
+      status: 'abandoned',
+      active: false,
+    });
+    github.dispatch.mockResolvedValueOnce('301');
+    expect(await service.trigger(id, randomUUID(), actor)).toMatchObject({
+      status: 'queued',
+      active: true,
+    });
+  });
   it('keeps the newest report when deliveries race', async () => {
     const { service } = await setup();
     const task = await service.save(null, input, actor);
@@ -322,6 +542,21 @@ describe('build tasks', () => {
     ).rejects.toThrow();
     expect((await service.detail(String(task.id))).comments).toHaveLength(0);
   });
+  it('keeps the assigned branch when an edit leaves it blank', async () => {
+    const { service, github } = await setup();
+    const task = await service.save(null, input, actor),
+      id = String(task.id);
+    expect(
+      await service.save(id, { ...input, title: 'Renamed' }, actor),
+    ).toMatchObject({ title: 'Renamed', targetBranch: task.targetBranch });
+    expect(
+      await service.save(id, { ...input, targetBranch: 'apps/renamed' }, actor),
+    ).toMatchObject({ targetBranch: 'apps/renamed' });
+    await service.trigger(id, randomUUID(), actor);
+    expect(github.createIssue.mock.calls[0]?.[1]).toContain(
+      '### 目标分支\n\napps/renamed',
+    );
+  });
   it('treats user Markdown headings as content instead of control fields', () => {
     const body = issueBody(
       {
@@ -398,6 +633,53 @@ describe('GitHub bridge', () => {
     });
     expect(options?.redirect).toBe('error');
   });
+  it('validates GitHub run responses and pages through dispatches to find a request', async () => {
+    const page = (runs: unknown[], total: number) =>
+      new Response(JSON.stringify({ total_count: total, workflow_runs: runs }));
+    const run = (id: number, title: string | null) => ({
+      id,
+      status: 'queued',
+      conclusion: null,
+      display_title: title,
+    });
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        page(
+          Array.from({ length: 100 }, (_, i) =>
+            run(i + 1, `request other-${i}`),
+          ),
+          150,
+        ),
+      )
+      .mockResolvedValueOnce(
+        page([run(500, null), run(501, 'Build · request wanted')], 150),
+      );
+    const client = new GitHubBuildClient(config, request);
+    expect(await client.findRun('wanted', '2026-09-28T00:00:00.000Z')).toEqual(
+      run(501, 'Build · request wanted'),
+    );
+    expect(request.mock.calls.map(([url]) => String(url))).toEqual([
+      expect.stringContaining(
+        '&page=1&created=%3E%3D2026-09-28T00%3A00%3A00.000Z',
+      ),
+      expect.stringContaining('&page=2&'),
+    ]);
+    request.mockReset().mockResolvedValueOnce(page([run(1, 'request x')], 1));
+    expect(await client.findRun('missing', '2026-09-28T00:00:00.000Z')).toBe(
+      null,
+    );
+    expect(request).toHaveBeenCalledTimes(1);
+    request
+      .mockReset()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: 'x', status: 'queued' })),
+      );
+    await expect(client.run('100')).rejects.toMatchObject({
+      code: 'GITHUB_ERROR',
+      message: 'GITHUB_RESPONSE_INVALID',
+    });
+  });
   it('does not send an Issue until the external entry guard is installed', async () => {
     const request = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
@@ -415,8 +697,9 @@ describe('GitHub bridge', () => {
 });
 
 describe('build task routes', () => {
-  it('rejects anonymous and unpermitted requests and accepts a permitted draft without dispatching', async () => {
-    const { service, github } = await setup();
+  async function routes() {
+    const fixture = await setup();
+    const { service } = fixture;
     const container = new ServiceContainer();
     container.instance(buildTasksServiceToken, service);
     const authenticated: MiddlewareHandler = async (c, next) => {
@@ -454,17 +737,20 @@ describe('build task routes', () => {
     const router = await buildTaskRoutes.createRouter({
       container,
     } as Application);
-    const app = new Hono().route('/', router);
+    return { ...fixture, app: new Hono().route('/', router) };
+  }
+  const headers = {
+    'x-test-user': '1',
+    'x-test-grant': '1',
+    'content-type': 'application/json',
+  };
+  it('rejects anonymous and unpermitted requests and accepts a permitted draft without dispatching', async () => {
+    const { app, github } = await routes();
     expect((await app.request('/build-tasks')).status).toBe(401);
     expect(
       (await app.request('/build-tasks', { headers: { 'x-test-user': '1' } }))
         .status,
     ).toBe(403);
-    const headers = {
-      'x-test-user': '1',
-      'x-test-grant': '1',
-      'content-type': 'application/json',
-    };
     const response = await app.request('/build-tasks', {
       method: 'POST',
       headers,
@@ -483,5 +769,59 @@ describe('build task routes', () => {
       ).status,
     ).toBe(400);
     expect((await app.request('/unrelated')).status).toBe(404);
+  });
+  it('releases an active run only for a permitted user and only while it holds the task', async () => {
+    const { app, github } = await routes();
+    github.dispatch.mockRejectedValueOnce(new Error('Timeout'));
+    const created = await app.request('/build-tasks', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(input),
+    });
+    const task = (await created.json()).data;
+    const runs = `/build-tasks/${task.id}/runs`;
+    const started = await app.request(runs, {
+      method: 'POST',
+      headers: { ...headers, 'Idempotency-Key': randomUUID() },
+    });
+    const run = (await started.json()).data;
+    expect(run).toMatchObject({ status: 'dispatch_unknown', active: true });
+    const release = `${runs}/${run.id}/release`;
+    expect((await app.request(release, { method: 'POST' })).status).toBe(401);
+    expect(
+      (
+        await app.request(release, {
+          method: 'POST',
+          headers: { 'x-test-user': '1' },
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await app.request(`${runs}/${randomUUID()}/release`, {
+          method: 'POST',
+          headers,
+        })
+      ).status,
+    ).toBe(404);
+    const released = await app.request(release, { method: 'POST', headers });
+    expect(released.status).toBe(200);
+    expect((await released.json()).data).toMatchObject({
+      status: 'abandoned',
+      active: false,
+      released: { byName: 'Staff' },
+    });
+    const again = await app.request(release, { method: 'POST', headers });
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ message: 'RUN_NOT_ACTIVE' });
+    github.dispatch.mockResolvedValueOnce('200');
+    expect(
+      (
+        await app.request(runs, {
+          method: 'POST',
+          headers: { ...headers, 'Idempotency-Key': randomUUID() },
+        })
+      ).status,
+    ).toBe(202);
   });
 });

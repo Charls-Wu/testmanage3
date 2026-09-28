@@ -123,6 +123,17 @@ export const problemFixRoutes: AppApiRouteContribution<Application> =
           .refresh(problemId(c), z.string().uuid().parse(c.req.param('runId'))),
       }),
     );
+    staff.post('/:problemId/runs/:runId/release', permit('run'), async (c) =>
+      c.json({
+        data: await c
+          .get('problemFixes')
+          .release(
+            problemId(c),
+            z.string().uuid().parse(c.req.param('runId')),
+            actor(c),
+          ),
+      }),
+    );
 
     // Factory: the source-bound integration key /evaluations/import accepts.
     // Browser sessions and ordinary user API keys are not accepted here.
@@ -136,6 +147,8 @@ export const problemFixRoutes: AppApiRouteContribution<Application> =
         .resolve(evaluationServiceToken)
         .authenticate(apiKey ?? bearer?.slice(7) ?? '');
       if (!source) return c.json({ code: 'UNAUTHORIZED' }, 401);
+      // 503 while fixes are disabled, 403 for another repository's key.
+      service.authorizeSource(source);
       c.set('source', source);
       await next();
     });

@@ -5,6 +5,8 @@ import {
 } from './evaluations/problems.js';
 import { validateDocument } from './evaluations/protocol.js';
 import type { ArchiveManifest } from './evaluations/document.js';
+import type { FactoryPreviewConfig } from '../config/factory-preview.js';
+import { loggingToken } from '@nocobase/app-server/logging';
 import {
   databaseManagerToken,
   type DatabaseManager,
@@ -646,22 +648,26 @@ export function parseProblemInput(
     );
   }
   // Owner has two encodings: `ownerId` (account) is authoritative, `owner` (name)
-  // is resolved when unique. Only touch `ownerId` when the payload carries it, so a
-  // create that sends a name does not look like an explicit "clear the owner".
+  // is resolved when unique. Only touch either when the payload carries it: an
+  // explicit null means "no owner", while leaving both out lets a problem filed
+  // under a feature point inherit that point's owner.
   if ('ownerId' in record) {
     input.ownerId = readNullableString(record.ownerId, 'ownerId', 64);
   }
-  if (write('owner')) {
+  if ('owner' in record) {
     input.owner = readNullableString(record.owner, 'owner', 100);
   }
 
   return input;
 }
 
+/** Whether a problem payload says who owns it; null counts as "no owner". */
+function hasOwnerFields(input: ProblemInput): boolean {
+  return input.ownerId !== undefined || input.owner !== undefined;
+}
+
 /** Validates one comment payload; the author always comes from the session. */
-export function parseProblemCommentInput(
-  payload: unknown,
-): ProblemCommentInput {
+export function parseProblemCommentInput(payload: unknown): ProblemCommentInput {
   const record = requireRecord(payload);
   return {
     content: readRequiredString(record.content, 'content', 20000),
@@ -891,7 +897,12 @@ function toProblemActivityRecord(row: Row): ProblemActivityRecord {
     problemId: Number(row.problemId),
     actorId: asOptionalText(row.actorId),
     actorName: asText(row.actorName),
-    kind: readEnum(PROBLEM_ACTIVITY_KINDS, row.kind, 'kind', 'created'),
+    kind: readEnum(
+      PROBLEM_ACTIVITY_KINDS,
+      row.kind,
+      'kind',
+      'created',
+    ),
     fromStatus:
       row.fromStatus === null || row.fromStatus === undefined
         ? null
@@ -915,8 +926,35 @@ function toProblemCommentRecord(row: Row): ProblemCommentRecord {
   };
 }
 
+/** The part of the application logger the Problems service reports through. */
+export interface TestProgressLogger {
+  error(details: Record<string, unknown>, message: string): void;
+}
+
+export interface TestProgressServiceOptions {
+  readonly logger?: TestProgressLogger;
+  /** Preview links for factory problems; none when omitted. */
+  readonly factoryPreview?: FactoryPreviewConfig;
+}
+
+/** Parsed report sources kept per process, oldest dropped first beyond this. */
+const REPORT_SOURCE_CACHE_LIMIT = 2000;
+
 class DefaultTestProgressService implements TestProgressService {
-  public constructor(private readonly database: DatabaseManager) {}
+  /**
+   * Report id → its source without `reportUrl`, or null when it has none. A stored
+   * report revision never changes, so it is parsed once per process.
+   */
+  private readonly reportSources = new Map<
+    string,
+    FactoryProblemSource | null
+  >();
+
+  public constructor(
+    private readonly database: DatabaseManager,
+    private readonly logger: TestProgressLogger,
+    private readonly factoryPreview: FactoryPreviewConfig | null,
+  ) {}
 
   public async listFeaturePoints(): Promise<FeaturePointRecord[]> {
     const rows = await this.database
@@ -937,8 +975,7 @@ class DefaultTestProgressService implements TestProgressService {
     >();
     for (const problem of problemRows) {
       const key = Number(problem.featurePointId);
-      const grouped =
-        problemsByFeaturePoint.get(key) ?? emptyProblemCountsByType();
+      const grouped = problemsByFeaturePoint.get(key) ?? emptyProblemCountsByType();
       const type = readEnum(PROBLEM_TYPES, problem.type, 'type', 'manual');
       const status = readEnum(
         PROBLEM_STATUSES,
@@ -1288,39 +1325,77 @@ class DefaultTestProgressService implements TestProgressService {
     return record;
   }
 
-  /** Batch report metadata only for problems already selected by the existing read scope. */
+  /**
+   * Report links for problems already selected by the existing read scope. Only
+   * `reportUrl`, which a replay may add once, is read every time; the rest comes
+   * from the parsed report. A report that cannot be read loses its links and is
+   * logged, instead of failing every list that includes one of its problems.
+   */
   private async factorySources(
     reportIds: string[],
   ): Promise<Map<string, FactoryProblemSource>> {
     const sources = new Map<string, FactoryProblemSource>();
     const ids = [...new Set(reportIds)];
     for (let offset = 0; offset < ids.length; offset += 200) {
-      const stored = await this.database
+      const links = await this.database
         .query()
         .selectFrom('evaluationReports')
-        .select(['id', 'document', 'manifest', 'reportUrl', 'bundleFileId'])
+        .select(['id', 'reportUrl'])
         .where('id', 'in', ids.slice(offset, offset + 200))
         .execute();
-      for (const row of stored) {
-        const document = validateDocument(JSON.parse(String(row.document)));
-        if (document.type === 'evaluation-report')
-          sources.set(
-            String(row.id),
-            factoryProblemSource(
-              String(row.id),
-              document,
-              row.bundleFileId == null
-                ? ['evaluation.json']
-                : (
-                    JSON.parse(String(row.manifest)) as ArchiveManifest
-                  ).files.map((file) => file.path),
-              typeof row.reportUrl === 'string' ? row.reportUrl : null,
-              row.bundleFileId != null,
-            ),
-          );
+      const unread = links
+        .map((row) => String(row.id))
+        .filter((id) => !this.reportSources.has(id));
+      if (unread.length > 0) {
+        const stored = await this.database
+          .query()
+          .selectFrom('evaluationReports')
+          .select(['id', 'document', 'manifest', 'bundleFileId'])
+          .where('id', 'in', unread)
+          .execute();
+        for (const row of stored) this.rememberReportSource(row);
+      }
+      for (const row of links) {
+        const source = this.reportSources.get(String(row.id));
+        if (source)
+          sources.set(String(row.id), {
+            ...source,
+            reportUrl: typeof row.reportUrl === 'string' ? row.reportUrl : null,
+          });
       }
     }
     return sources;
+  }
+
+  private rememberReportSource(row: Row): void {
+    const id = String(row.id);
+    let source: FactoryProblemSource | null = null;
+    try {
+      const document = validateDocument(JSON.parse(String(row.document)));
+      if (document.type === 'evaluation-report')
+        source = factoryProblemSource(
+          id,
+          document,
+          row.bundleFileId == null
+            ? ['evaluation.json']
+            : (JSON.parse(String(row.manifest)) as ArchiveManifest).files.map(
+                (file) => file.path,
+              ),
+          null,
+          row.bundleFileId != null,
+          this.factoryPreview,
+        );
+    } catch (error) {
+      this.logger.error(
+        { reportId: id, err: error },
+        'Stored factory report could not be read; its problems are listed without report links.',
+      );
+    }
+    if (this.reportSources.size >= REPORT_SOURCE_CACHE_LIMIT) {
+      const oldest = this.reportSources.keys().next();
+      if (!oldest.done) this.reportSources.delete(oldest.value);
+    }
+    this.reportSources.set(id, source);
   }
 
   public async createProblem(
@@ -1332,15 +1407,19 @@ class DefaultTestProgressService implements TestProgressService {
     if (!title) {
       throw new TestProgressValidationError('title is required.');
     }
-    if (featurePointId === undefined) {
+    // Only factory intake files a problem as Uncategorized; staff always choose.
+    if (featurePointId === undefined || featurePointId === null) {
       throw new TestProgressValidationError('featurePointId is required.');
     }
 
-    if (featurePointId !== null) await this.requireFeaturePoint(featurePointId);
+    await this.requireFeaturePoint(featurePointId);
     const now = new Date();
-    let owner = await this.resolveOwnerFields(input);
-    if (featurePointId !== null && !owner.owner && !owner.ownerId)
-      owner = (await this.featurePointOwner(featurePointId)) ?? owner;
+    const owner = hasOwnerFields(input)
+      ? await this.resolveOwnerFields(input)
+      : ((await this.featurePointOwner(featurePointId)) ?? {
+          owner: null,
+          ownerId: null,
+        });
     const result = await this.database
       .query()
       .insertInto('issues')
@@ -1396,33 +1475,31 @@ class DefaultTestProgressService implements TestProgressService {
     if (patch.description !== undefined) set.description = patch.description;
     if (patch.type !== undefined) set.type = patch.type;
     if (patch.status !== undefined) set.status = patch.status;
-    if (patch.ownerId !== undefined || patch.owner !== undefined) {
+    if (hasOwnerFields(patch)) {
       const owner = await this.resolveOwnerFields(patch);
       set.owner = owner.owner;
       set.ownerId = owner.ownerId;
     }
-    if (patch.featurePointId !== undefined) {
-      if (patch.featurePointId !== null)
-        await this.requireFeaturePoint(patch.featurePointId);
+    const previousFeaturePointId =
+      existing.featurePointId == null ? null : Number(existing.featurePointId);
+    if (
+      patch.featurePointId !== undefined &&
+      patch.featurePointId !== previousFeaturePointId
+    ) {
+      // Uncategorized is where factory intake waits for a person; staff can
+      // leave a problem there but cannot move a classified one back.
+      if (patch.featurePointId === null) {
+        throw new TestProgressValidationError('featurePointId is required.');
+      }
+      await this.requireFeaturePoint(patch.featurePointId);
       set.featurePointId = patch.featurePointId;
       // A person's choice replaces the factory's, and later deliveries keep it.
-      const previous =
-        existing.featurePointId == null
-          ? null
-          : Number(existing.featurePointId);
-      if (patch.featurePointId !== previous) {
-        set.classificationSource = 'manual';
-        set.classificationNote = null;
-        // Filing an ownerless problem under a feature point hands it to that
-        // point's owner; a problem that already has one keeps it.
-        const owner =
-          'ownerId' in set
-            ? set
-            : { owner: existing.owner, ownerId: existing.ownerId };
-        const inherited =
-          patch.featurePointId !== null && !owner.owner && !owner.ownerId
-            ? await this.featurePointOwner(patch.featurePointId)
-            : null;
+      set.classificationSource = 'manual';
+      set.classificationNote = null;
+      // Filing an ownerless problem under a feature point hands it to that
+      // point's owner, unless this change also says who owns it (null included).
+      if (!hasOwnerFields(patch) && !existing.owner && !existing.ownerId) {
+        const inherited = await this.featurePointOwner(patch.featurePointId);
         if (inherited) Object.assign(set, inherited);
       }
     }
@@ -1734,8 +1811,7 @@ class DefaultTestProgressService implements TestProgressService {
         'unspecified',
       );
       const grouped =
-        problemsByFeaturePoint.get(Number(row.id)) ??
-        emptyProblemCountsByType();
+        problemsByFeaturePoint.get(Number(row.id)) ?? emptyProblemCountsByType();
 
       if (level === 'dimension') {
         dimensionById.set(Number(row.id), {
@@ -1860,8 +1936,7 @@ class DefaultTestProgressService implements TestProgressService {
             : `name:${ownerText}`;
       const bucket = buckets.get(key) ?? {
         ownerId,
-        owner:
-          ownerId !== null ? (ownerNames.get(ownerId) ?? ownerText) : ownerText,
+        owner: ownerId !== null ? (ownerNames.get(ownerId) ?? ownerText) : ownerText,
         open: 0,
         total: 0,
       };
@@ -1905,12 +1980,6 @@ class DefaultTestProgressService implements TestProgressService {
     return new Map(rows.map((row) => [String(row.id), asText(row.name)]));
   }
 
-  /**
-   * Owner writes are account associations: `ownerId` is authoritative and also
-   * refreshes the legacy `owner` text. A name-only write (scripts, older clients)
-   * resolves to an account when the display name is unique, and stays text
-   * otherwise so an environment without accounts keeps working.
-   */
   /** The owner a problem inherits when it is filed under this feature point. */
   private async featurePointOwner(
     id: number,
@@ -1926,6 +1995,12 @@ class DefaultTestProgressService implements TestProgressService {
     return owner || ownerId ? { owner, ownerId } : null;
   }
 
+  /**
+   * Owner writes are account associations: `ownerId` is authoritative and also
+   * refreshes the legacy `owner` text. A name-only write (scripts, older clients)
+   * resolves to an account when the display name is unique, and stays text
+   * otherwise so an environment without accounts keeps working.
+   */
   private async resolveOwnerFields(input: {
     readonly ownerId?: string | null;
     readonly owner?: string | null;
@@ -2038,8 +2113,15 @@ class DefaultTestProgressService implements TestProgressService {
 
 export function createTestProgressService(
   database: DatabaseManager,
+  options: TestProgressServiceOptions = {},
 ): TestProgressService {
-  return new DefaultTestProgressService(database);
+  return new DefaultTestProgressService(
+    database,
+    options.logger ?? {
+      error: (details, message) => console.error(message, details),
+    },
+    options.factoryPreview ?? null,
+  );
 }
 
 export default class TestProgressProvider extends ServiceProvider<Application> {
@@ -2048,7 +2130,13 @@ export default class TestProgressProvider extends ServiceProvider<Application> {
   public override register(): void {
     this.app.container.singleton(testProgressServiceToken, () => {
       const database = this.app.container.resolve(databaseManagerToken);
-      return createTestProgressService(database);
+      const logger = this.app.container.resolve(loggingToken).getLogger();
+      return createTestProgressService(database, {
+        logger: { error: (details, message) => logger.error(details, message) },
+        factoryPreview:
+          this.app.config.get<FactoryPreviewConfig>('factoryPreview') ??
+          undefined,
+      });
     });
   }
 }
