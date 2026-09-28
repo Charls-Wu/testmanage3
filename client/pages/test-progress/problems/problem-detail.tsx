@@ -2,7 +2,7 @@ import { ApiClientError, useApiClient } from '@nocobase/app-client';
 import { useAuthentication } from '@nocobase/app-plugin-authentication/client';
 import { useTranslation } from '@nocobase/i18n/client';
 import { Check, Copy, Pencil, Trash2 } from 'lucide-react';
-import { useState, type ReactElement } from 'react';
+import { useCallback, useState, type ReactElement } from 'react';
 import { Link, Outlet, useParams } from 'react-router';
 import { toast } from 'sonner';
 
@@ -36,6 +36,9 @@ import {
 } from '../shared.js';
 import { useAsyncResource } from '../use-async-resource.js';
 import { useRefetchOnReturn } from '../use-refetch-on-return.js';
+import { ClassificationBadge } from './classification-badge.js';
+import { FactoryLinks, FactorySource } from './factory-source.js';
+import { ProblemFixSection } from './problem-fix.js';
 
 export default function ProblemDetailPage(): ReactElement {
   const { t } = useTranslation();
@@ -48,6 +51,16 @@ export default function ProblemDetailPage(): ReactElement {
     (signal) => fetchProblem(api, id, signal),
   );
   useRefetchOnReturn(resource.reload);
+  // A finished Claude Code run adds a comment and may change the status. Reload
+  // those in place: a full reload would unmount the page and drop comment drafts.
+  const [revision, setRevision] = useState(0);
+  const { mutate } = resource;
+  const settle = useCallback(() => {
+    void fetchProblem(api, id)
+      .then((next) => mutate(() => next))
+      .catch(() => toast.error(t('problemFixes.settleError')));
+    setRevision((value) => value + 1);
+  }, [api, id, mutate, t]);
 
   const notFound =
     !validId ||
@@ -80,8 +93,18 @@ export default function ProblemDetailPage(): ReactElement {
             <>
               <ProblemDetail problem={resource.data} />
               <div className='space-y-6'>
-                <ProblemComments problemId={resource.data.id} />
-                <ProblemTimeline problemId={resource.data.id} />
+                <ProblemFixSection
+                  problemId={resource.data.id}
+                  onSettled={settle}
+                />
+                <ProblemComments
+                  problemId={resource.data.id}
+                  revision={revision}
+                />
+                <ProblemTimeline
+                  problemId={resource.data.id}
+                  revision={revision}
+                />
               </div>
             </>
           ) : null}
@@ -102,7 +125,12 @@ function ProblemDetail({
   return (
     <div className='mb-6 space-y-6'>
       <PageHeader
-        title={problem.title}
+        title={
+          // Titles may span lines; the header is the only place they are shown.
+          <span className='whitespace-pre-wrap break-words'>
+            {problem.title}
+          </span>
+        }
         description={<ProblemStatusBadge status={problem.status} />}
         actions={
           <Button render={<Link to='edit' />} variant='outline'>
@@ -126,29 +154,58 @@ function ProblemDetail({
               <ProblemStatusBadge status={problem.status} />
             </DefinitionItem>
             <DefinitionItem label={t('testProgress.fieldFeaturePoint')}>
-              <Link
-                className='text-primary underline-offset-4 hover:underline'
-                to={`/progress/features/${problem.featurePointId}`}
-              >
-                {problem.featurePointName ?? '—'}
-              </Link>
+              <span className='inline-flex flex-wrap items-center gap-1.5'>
+                {problem.featurePointId == null ? (
+                  <span>{t('testProgress.uncategorized')}</span>
+                ) : (
+                  <Link
+                    className='text-primary underline-offset-4 hover:underline'
+                    to={`/progress/features/${problem.featurePointId}`}
+                  >
+                    {problem.featurePointName ?? '—'}
+                  </Link>
+                )}
+                {problem.classification && (
+                  <ClassificationBadge
+                    classification={problem.classification}
+                  />
+                )}
+              </span>
+              {problem.classification?.note && (
+                <p className='mt-1 text-xs leading-5 text-muted-foreground'>
+                  {problem.classification.note}
+                </p>
+              )}
             </DefinitionItem>
             <DefinitionItem label={t('testProgress.fieldOwner')}>
               <span>{problem.owner ?? '—'}</span>
             </DefinitionItem>
           </dl>
-          <DefinitionItem label={t('testProgress.fieldProblemTitle')}>
-            <p className='whitespace-pre-wrap'>{problem.title}</p>
-          </DefinitionItem>
-          <DefinitionItem label={t('testProgress.fieldProblemDescription')}>
-            {problem.description === null || problem.description.trim() === '' ? (
-              <p className='text-muted-foreground'>{t('testProgress.noNote')}</p>
-            ) : (
-              <MarkdownContent content={problem.description} />
-            )}
-          </DefinitionItem>
+          {problem.factorySource && (
+            <FactoryLinks source={problem.factorySource} />
+          )}
         </CardContent>
       </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>{t('testProgress.fieldProblemDescription')}</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {problem.description === null || problem.description.trim() === '' ? (
+            <p className='text-sm text-muted-foreground'>
+              {t('testProgress.noNote')}
+            </p>
+          ) : (
+            <MarkdownContent
+              content={problem.description}
+              className='max-w-5xl break-words'
+            />
+          )}
+        </CardContent>
+      </Card>
+      {problem.factorySource && (
+        <FactorySource source={problem.factorySource} problemId={problem.id} />
+      )}
     </div>
   );
 }
@@ -273,13 +330,15 @@ async function writeClipboard(text: string): Promise<void> {
 
 function ProblemTimeline({
   problemId,
+  revision,
 }: {
   readonly problemId: number;
+  readonly revision: number;
 }): ReactElement {
   const { t } = useTranslation();
   const api = useApiClient();
   const activities = useAsyncResource<ProblemActivity[]>(
-    `problem-activities|${problemId}`,
+    `problem-activities|${problemId}|${revision}`,
     (signal) => fetchProblemActivities(api, problemId, signal),
   );
 
@@ -356,15 +415,17 @@ function ProblemTimeline({
 
 function ProblemComments({
   problemId,
+  revision,
 }: {
   readonly problemId: number;
+  readonly revision: number;
 }): ReactElement {
   const { t } = useTranslation();
   const api = useApiClient();
   const { session } = useAuthentication();
   const currentUserId = session?.user?.id ?? null;
   const comments = useAsyncResource<ProblemComment[]>(
-    `problem-comments|${problemId}`,
+    `problem-comments|${problemId}|${revision}`,
     (signal) => fetchProblemComments(api, problemId, signal),
   );
   const [draft, setDraft] = useState('');

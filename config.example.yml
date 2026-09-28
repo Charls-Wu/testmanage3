@@ -142,3 +142,29 @@ logging:
     enabled: true
     # Set true for human-readable terminal output.
     pretty: false
+
+# GitHub factory integration (server only). Store the token in deployment
+# configuration or FACTORY_GITHUB_TOKEN, never in source or browser storage.
+buildTasks:
+  enabled: false
+  repository: gchust/nb3-factory
+  workflow: code-agent-task.yml
+  ref: develop
+  token: ''
+
+# Claude Code problem fixes (server only). An empty token reuses buildTasks.token;
+# PROBLEM_FIXES_GITHUB_TOKEN and PROBLEM_FIXES_ENABLED override these values.
+problemFixes:
+  enabled: false
+  repository: gchust/nb3-factory
+  workflow: framework-fix.yml
+  ref: develop
+  token: ''
+
+# Preview links on factory problems (server only). A report the factory
+# repository produced for its own pull request links to
+# https://nb3-<PR>.<domain>/main/; an empty repository turns the links off.
+# FACTORY_PREVIEW_DOMAIN overrides the domain.
+factoryPreview:
+  repository: gchust/nb3-factory
+  domain: nfvd.net

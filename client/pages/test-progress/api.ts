@@ -61,12 +61,28 @@ export interface Problem {
   readonly id: number;
   readonly title: string;
   readonly description: string | null;
-  readonly featurePointId: number;
+  readonly featurePointId: number | null;
   readonly featurePointName: string | null;
   readonly type: ProblemType;
   readonly status: ProblemStatus;
   readonly owner: string | null;
   readonly ownerId: string | null;
+  readonly factorySource?: {
+    reportId: string;
+    taskTitle: string;
+    issueUrl: string;
+    pullRequestUrl: string | null;
+    environmentUrl?: string | null;
+    runUrl: string;
+    files: string[];
+    reportUrl?: string | null;
+    hasArchive?: boolean;
+  };
+  /** The factory's own feature point decision, until someone changes it. */
+  readonly classification?: {
+    readonly source: 'rule' | 'model';
+    readonly note: string | null;
+  } | null;
 }
 
 /** One Markdown comment under a problem. */
@@ -148,6 +164,8 @@ export interface ProgressSummary {
   readonly exampleExists: ExampleExistsBreakdown;
   readonly problems: ProblemCountsByType;
   readonly dimensions: readonly DimensionSummary[];
+  /** Problems with no feature point: in `totals`, but in no dimension. */
+  readonly uncategorized: ProblemCounts;
   /** Per-owner workload, most open problems first. */
   readonly owners: readonly OwnerWorkload[];
 }
@@ -177,14 +195,15 @@ export interface FeaturePointPayload {
 export interface ProblemPayload {
   title?: string;
   description?: string | null;
-  featurePointId?: number;
+  featurePointId?: number | null;
   type?: ProblemType;
   status?: ProblemStatus;
   ownerId?: string | null;
 }
 
 export interface ProblemFilter {
-  readonly featurePointId?: number;
+  /** `null` selects Uncategorized problems. */
+  readonly featurePointId?: number | null;
   readonly type?: ProblemType;
   readonly status?: ProblemStatus;
   /** Only problems that are not yet verified. */
@@ -312,7 +331,8 @@ export async function fetchProblems(
 ): Promise<Problem[]> {
   const query: Record<string, string> = {};
   if (filter.featurePointId !== undefined) {
-    query.featurePointId = String(filter.featurePointId);
+    query.featurePointId =
+      filter.featurePointId === null ? 'none' : String(filter.featurePointId);
   }
   if (filter.type !== undefined) {
     query.type = filter.type;

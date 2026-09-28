@@ -26,7 +26,7 @@ import { cn } from '@/lib/utils';
  * the typography plugin, and the tokens keep it readable in both themes.
  */
 const MARKDOWN_CLASS = cn(
-  'text-sm leading-6 text-foreground',
+  'min-w-0 break-words text-sm leading-6 text-foreground',
   '[&_h1]:mt-3 [&_h1]:mb-2 [&_h1]:font-heading [&_h1]:text-lg [&_h1]:font-semibold',
   '[&_h2]:mt-3 [&_h2]:mb-2 [&_h2]:font-heading [&_h2]:text-base [&_h2]:font-semibold',
   '[&_h3]:mt-3 [&_h3]:mb-1.5 [&_h3]:font-semibold',

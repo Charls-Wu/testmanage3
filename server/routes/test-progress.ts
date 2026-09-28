@@ -9,6 +9,8 @@ import {
 } from '@nocobase/app-server/router';
 import { Hono, type Context } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
+import { evaluationServiceToken } from '../providers/evaluations/index.js';
+import { EvaluationError } from '../providers/evaluations/protocol.js';
 
 import {
   PROBLEM_STATUSES,
@@ -113,7 +115,7 @@ function readActor(context: Context): ProblemActor {
 
 function readProblemFilter(context: Context): ProblemFilter {
   const filter: {
-    featurePointId?: number;
+    featurePointId?: number | null;
     type?: ProblemType;
     status?: ProblemStatus;
     open?: boolean;
@@ -122,11 +124,14 @@ function readProblemFilter(context: Context): ProblemFilter {
   } = {};
 
   const featurePointId = context.req.query('featurePointId');
-  if (featurePointId !== undefined && featurePointId !== '') {
+  // `none` selects Uncategorized problems, which factory intake files unplaced.
+  if (featurePointId === 'none') {
+    filter.featurePointId = null;
+  } else if (featurePointId !== undefined && featurePointId !== '') {
     const parsed = Number(featurePointId);
     if (!Number.isInteger(parsed) || parsed <= 0) {
       throw new TestProgressValidationError(
-        'featurePointId must be a positive integer.',
+        'featurePointId must be a positive integer or none.',
       );
     }
     filter.featurePointId = parsed;
@@ -242,6 +247,36 @@ export const testProgressApiRoutes: AppApiRouteContribution<Application> =
         201,
       ),
     );
+    // The attachment belongs to the already-readable problem; callers cannot choose a report ID.
+    router.get('/test-progress/problems/:problemId/report', async (context) => {
+      try {
+        const problem = await service.getProblem(
+          readIdParam(context, 'problemId'),
+        );
+        const file = context.req.query('path') ?? 'bundle.zip';
+        if (
+          !problem.factorySource ||
+          !['bundle.zip', 'report.html', 'evaluation.json'].includes(file)
+        )
+          return context.json({ code: 'NOT_FOUND' }, 404);
+        const result = await app.container
+          .resolve(evaluationServiceToken)
+          .attachment(problem.factorySource.reportId, file);
+        return new Response(new Uint8Array(result.bytes), {
+          headers: {
+            'content-type': result.contentType,
+            'content-disposition': `attachment; filename="${file}"`,
+            'content-security-policy': "sandbox; default-src 'none'",
+            'x-content-type-options': 'nosniff',
+            'cache-control': 'private, no-store',
+          },
+        });
+      } catch (error) {
+        if (error instanceof EvaluationError && error.code === 'NOT_FOUND')
+          return context.json({ code: 'NOT_FOUND' }, 404);
+        return toErrorResponse(context, error);
+      }
+    });
     router.patch('/test-progress/problems/:problemId', (context) =>
       respond(context, async () =>
         service.updateProblem(

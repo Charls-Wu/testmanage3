@@ -18,6 +18,9 @@ import database from './database.js';
 import snowflake from './snowflake.js';
 import ai from './ai.js';
 import workflow from './workflow.js';
+import buildTasks from './build-tasks.js';
+import problemFixes from './problem-fixes.js';
+import factoryPreview from './factory-preview.js';
 
 const defaultConfigs: AppConfigFactory<{
   auth: ReturnType<typeof auth>;
@@ -36,6 +39,9 @@ const defaultConfigs: AppConfigFactory<{
   snowflake: ReturnType<typeof snowflake>;
   ai: ReturnType<typeof ai>;
   workflow: ReturnType<typeof workflow>;
+  buildTasks: ReturnType<typeof buildTasks>;
+  problemFixes: ReturnType<typeof problemFixes>;
+  factoryPreview: ReturnType<typeof factoryPreview>;
 }> = defaultAppConfigs({
   auth,
   authorization,
@@ -53,6 +59,9 @@ const defaultConfigs: AppConfigFactory<{
   snowflake,
   ai,
   workflow,
+  buildTasks,
+  problemFixes,
+  factoryPreview,
 });
 
 export default defaultConfigs;
